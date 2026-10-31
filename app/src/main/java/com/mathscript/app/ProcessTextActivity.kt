@@ -16,7 +16,8 @@ class ProcessTextActivity : Activity() {
             ?: intent.getStringExtra(Intent.EXTRA_TEXT)
 
         if (!selectedText.isNullOrEmpty()) {
-            val converted = ScriptMappings.convertMathScript(selectedText)
+            val trimmedText = selectedText.trimEnd('\n', '\r')
+            val converted = ScriptMappings.convertMathScript(trimmedText)
             val isReadOnly = intent.getBooleanExtra(Intent.EXTRA_PROCESS_TEXT_READONLY, false)
 
             // Always copy to clipboard as fallback for Samsung Notes / WhatsApp Share
