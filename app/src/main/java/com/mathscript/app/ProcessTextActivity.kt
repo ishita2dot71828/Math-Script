@@ -30,6 +30,7 @@ class ProcessTextActivity : Activity() {
                 }
                 setResult(RESULT_OK, resultIntent)
             } else {
+                MathAccessibilityService.instance?.convertCurrentSelection()
                 Toast.makeText(this, "Copied: $converted", Toast.LENGTH_SHORT).show()
             }
         }
