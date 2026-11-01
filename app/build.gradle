@@ -11,8 +11,9 @@ android {
         applicationId "com.mathscript.app"
         minSdk 23
         targetSdk 34
-        versionCode 1
-        versionName "1.0"
+        def runNumber = System.getenv("GITHUB_RUN_NUMBER")?.toInteger() ?: 15
+        versionCode 15 + runNumber
+        versionName "1.5.${runNumber}"
     }
 
     compileOptions {
