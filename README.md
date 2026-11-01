@@ -3,5 +3,5 @@ This is a simple project that let you write superscript and subscript of numeric
 The second release onwards, it require accessibility permission. 
 
 Tested on: 
-1. Redmi 125G(8/256)
+1. Redmi 12 5G(8/256)
 2. Samsung S10 Fe(8/128)
