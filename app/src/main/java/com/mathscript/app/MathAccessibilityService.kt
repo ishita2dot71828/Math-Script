@@ -20,6 +20,9 @@ class MathAccessibilityService : AccessibilityService() {
     }
 
     private var lastEditableNode: AccessibilityNodeInfo? = null
+    private var lastSelectionStart: Int = -1
+    private var lastSelectionEnd: Int = -1
+    private var lastKnownText: String = ""
 
     override fun onServiceConnected() {
         super.onServiceConnected()
@@ -28,12 +31,18 @@ class MathAccessibilityService : AccessibilityService() {
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         val pkg = event?.packageName?.toString() ?: return
-        // Ignore SystemUI so pulling down Quick Settings doesn't overwrite the target field
         if (pkg == "com.android.systemui") return
 
         val source = event.source ?: return
         if (source.isEditable || hasActiveSelection(source)) {
             lastEditableNode = source
+            val s = source.textSelectionStart
+            val e = source.textSelectionEnd
+            if (s >= 0 && e >= 0 && s != e) {
+                lastSelectionStart = minOf(s, e)
+                lastSelectionEnd = maxOf(s, e)
+                lastKnownText = source.text?.toString() ?: ""
+            }
         }
     }
 
@@ -56,30 +65,50 @@ class MathAccessibilityService : AccessibilityService() {
 
         if (targetNode != null && !targetNode.text.isNullOrEmpty()) {
             val fullText = targetNode.text.toString()
-            val start = targetNode.textSelectionStart
-            val end = targetNode.textSelectionEnd
+            val liveStart = targetNode.textSelectionStart
+            val liveEnd = targetNode.textSelectionEnd
 
-            val hasSelection = start >= 0 && end >= 0 && start != end
-            val min = if (hasSelection) minOf(start, end).coerceAtMost(fullText.length) else 0
-            val max = if (hasSelection) maxOf(start, end).coerceAtMost(fullText.length) else fullText.length
+            val hasLiveSelection = liveStart >= 0 && liveEnd >= 0 && liveStart != liveEnd
+
+            val (min, max) = when {
+                hasLiveSelection -> {
+                    Pair(
+                        minOf(liveStart, liveEnd).coerceAtMost(fullText.length),
+                        maxOf(liveStart, liveEnd).coerceAtMost(fullText.length)
+                    )
+                }
+                lastSelectionStart >= 0 && lastSelectionEnd > lastSelectionStart && fullText == lastKnownText -> {
+                    Pair(
+                        lastSelectionStart.coerceAtMost(fullText.length),
+                        lastSelectionEnd.coerceAtMost(fullText.length)
+                    )
+                }
+                else -> Pair(0, fullText.length)
+            }
 
             val selectedSub = fullText.substring(min, max)
             val convertedSub = ScriptMappings.convertMathScript(selectedSub)
             val newFullText = fullText.substring(0, min) + convertedSub + fullText.substring(max)
 
-            // 1. Try direct in-place replacement first
+            lastSelectionStart = -1
+            lastSelectionEnd = -1
+
+            // 1. Direct overwrite first
             val setArgs = Bundle().apply {
                 putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, newFullText)
             }
-            val replaced = targetNode.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, setArgs)
-
-            if (replaced) {
+            if (targetNode.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, setArgs)) {
+                val cursorArgs = Bundle().apply {
+                    val newCursor = (min + convertedSub.length).coerceAtMost(newFullText.length)
+                    putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_START_INT, newCursor)
+                    putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_END_INT, newCursor)
+                }
+                targetNode.performAction(AccessibilityNodeInfo.ACTION_SET_SELECTION, cursorArgs)
                 Toast.makeText(this, "Converted!", Toast.LENGTH_SHORT).show()
                 return
             }
 
-            // 2. Fallback for Samsung Notes, Reddit, Obsidian, Discord:
-            // Copy the converted piece, keep the target range highlighted, and trigger ACTION_PASTE
+            // 2. Fallback: Re-select exact range, copy, and paste over it
             copyToClipboard(convertedSub)
 
             val selArgs = Bundle().apply {
@@ -90,13 +119,20 @@ class MathAccessibilityService : AccessibilityService() {
             targetNode.performAction(AccessibilityNodeInfo.ACTION_SET_SELECTION, selArgs)
 
             val pasted = targetNode.performAction(AccessibilityNodeInfo.ACTION_PASTE)
+
+            // 3. Post-paste cleanup if the app appended instead of replacing
+            targetNode.refresh()
+            val afterPasteText = targetNode.text?.toString() ?: ""
+            if (pasted && (afterPasteText.contains(selectedSub + convertedSub) || afterPasteText.contains(convertedSub + selectedSub))) {
+                targetNode.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, setArgs)
+            }
+
             if (pasted) {
                 Toast.makeText(this, "Converted & Pasted!", Toast.LENGTH_SHORT).show()
             } else {
                 Toast.makeText(this, "Copied: $convertedSub (Tap Paste to replace)", Toast.LENGTH_SHORT).show()
             }
         } else {
-            // 3. Final fallback: convert whatever is currently in the clipboard
             val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
             val clipText = clipboard.primaryClip?.getItemAt(0)?.text?.toString()
             if (!clipText.isNullOrEmpty()) {
@@ -112,7 +148,6 @@ class MathAccessibilityService : AccessibilityService() {
     private fun findBestTargetNode(): AccessibilityNodeInfo? {
         val roots = mutableListOf<AccessibilityNodeInfo>()
 
-        // Search all interactive windows (ignores SystemUI shade when Quick Settings is pulled down)
         for (window in windows) {
             val root = window.root ?: continue
             if (root.packageName?.toString() != "com.android.systemui") {
@@ -125,18 +160,16 @@ class MathAccessibilityService : AccessibilityService() {
             }
         }
 
-        // Pass 1: Look for an actively focused or selected editable/WebView node
         for (root in roots) {
             findSelectedOrFocusedNode(root, requireFocusOrSelection = true)?.let { return it }
         }
 
-        // Pass 2: Use the last tracked node before the Quick Settings shade was pulled down
         lastEditableNode?.let { cached ->
+            if (!cached.text.isNullOrEmpty()) return cached
             cached.refresh()
             if (!cached.text.isNullOrEmpty()) return cached
         }
 
-        // Pass 3: Look for any editable field with text on screen (catches unfocused Instagram/Discord bars)
         for (root in roots) {
             findSelectedOrFocusedNode(root, requireFocusOrSelection = false)?.let { return it }
         }
